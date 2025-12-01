@@ -149,11 +149,11 @@ async function fetchAndParseNewIPs(piu) {
 }
 
 // 生成VLESS链接
-function generateLinksFromSource(list, user, workerDomain) {
+function generateLinksFromSource(list, user, workerDomain, disableNonTLS = false) {
     const CF_HTTP_PORTS = [80, 8080, 8880, 2052, 2082, 2086, 2095];
     const CF_HTTPS_PORTS = [443, 2053, 2083, 2087, 2096, 8443];
     const defaultHttpsPorts = [443];
-    const defaultHttpPorts = [80];
+    const defaultHttpPorts = disableNonTLS ? [] : [80];
     const links = [];
     const wsPath = '/?ed=2048';
     const proto = 'vless';
@@ -215,11 +215,11 @@ function generateLinksFromSource(list, user, workerDomain) {
 }
 
 // 生成Trojan链接
-async function generateTrojanLinksFromSource(list, user, workerDomain) {
+async function generateTrojanLinksFromSource(list, user, workerDomain, disableNonTLS = false) {
     const CF_HTTP_PORTS = [80, 8080, 8880, 2052, 2082, 2086, 2095];
     const CF_HTTPS_PORTS = [443, 2053, 2083, 2087, 2096, 8443];
     const defaultHttpsPorts = [443];
-    const defaultHttpPorts = [80];
+    const defaultHttpPorts = disableNonTLS ? [] : [80];
     const links = [];
     const wsPath = '/?ed=2048';
     const password = user;  // Trojan使用UUID作为密码
@@ -238,7 +238,9 @@ async function generateTrojanLinksFromSource(list, user, workerDomain) {
             if (CF_HTTPS_PORTS.includes(port)) {
                 portsToGenerate.push({ port: port, tls: true });
             } else if (CF_HTTP_PORTS.includes(port)) {
-                portsToGenerate.push({ port: port, tls: false });
+                if (!disableNonTLS) {
+                    portsToGenerate.push({ port: port, tls: false });
+                }
             } else {
                 portsToGenerate.push({ port: port, tls: true });
             }
@@ -279,11 +281,11 @@ async function generateTrojanLinksFromSource(list, user, workerDomain) {
 }
 
 // 生成VMess链接
-function generateVMessLinksFromSource(list, user, workerDomain) {
+function generateVMessLinksFromSource(list, user, workerDomain, disableNonTLS = false) {
     const CF_HTTP_PORTS = [80, 8080, 8880, 2052, 2082, 2086, 2095];
     const CF_HTTPS_PORTS = [443, 2053, 2083, 2087, 2096, 8443];
     const defaultHttpsPorts = [443];
-    const defaultHttpPorts = [80];
+    const defaultHttpPorts = disableNonTLS ? [] : [80];
     const links = [];
     const wsPath = '/?ed=2048';
 
@@ -301,7 +303,9 @@ function generateVMessLinksFromSource(list, user, workerDomain) {
             if (CF_HTTPS_PORTS.includes(port)) {
                 portsToGenerate.push({ port: port, tls: true });
             } else if (CF_HTTP_PORTS.includes(port)) {
-                portsToGenerate.push({ port: port, tls: false });
+                if (!disableNonTLS) {
+                    portsToGenerate.push({ port: port, tls: false });
+                }
             } else {
                 portsToGenerate.push({ port: port, tls: true });
             }
@@ -370,7 +374,7 @@ function generateLinksFromNewIPs(list, user, workerDomain) {
 }
 
 // 生成订阅内容
-async function handleSubscriptionRequest(request, user, customDomain, piu, ipv4Enabled, ipv6Enabled, ispMobile, ispUnicom, ispTelecom, evEnabled, etEnabled, vmEnabled) {
+async function handleSubscriptionRequest(request, user, customDomain, piu, ipv4Enabled, ipv6Enabled, ispMobile, ispUnicom, ispTelecom, evEnabled, etEnabled, vmEnabled, disableNonTLS) {
     const url = new URL(request.url);
     const finalLinks = [];
     const workerDomain = url.hostname;  // workerDomain始终是请求的hostname
@@ -383,13 +387,13 @@ async function handleSubscriptionRequest(request, user, customDomain, piu, ipv4E
         const useVL = hasProtocol ? evEnabled : true;  // 如果没有选择任何协议，默认使用VLESS
         
         if (useVL) {
-            finalLinks.push(...generateLinksFromSource(list, user, nodeDomain));
+            finalLinks.push(...generateLinksFromSource(list, user, nodeDomain, disableNonTLS));
         }
         if (etEnabled) {
-            finalLinks.push(...await generateTrojanLinksFromSource(list, user, nodeDomain));
+            finalLinks.push(...await generateTrojanLinksFromSource(list, user, nodeDomain, disableNonTLS));
         }
         if (vmEnabled) {
-            finalLinks.push(...generateVMessLinksFromSource(list, user, nodeDomain));
+            finalLinks.push(...generateVMessLinksFromSource(list, user, nodeDomain, disableNonTLS));
         }
     }
 
@@ -980,6 +984,12 @@ function generateHomePage(scuValue) {
                     </label>
                 </div>
             </div>
+            
+            <div class="switch-group" style="margin-top: 20px;">
+                <label>仅TLS节点</label>
+                <div class="switch" id="switchTLS" onclick="toggleSwitch('switchTLS')"></div>
+            </div>
+            <small style="display: block; margin-top: -12px; margin-bottom: 12px; color: #86868b; font-size: 13px; padding-left: 0;">启用后只生成带TLS的节点，不生成非TLS节点（如80端口）</small>
         </div>
         
         <div class="footer">
@@ -998,7 +1008,8 @@ function generateHomePage(scuValue) {
             switchGitHub: true,
             switchVL: true,
             switchTJ: false,
-            switchVM: false
+            switchVM: false,
+            switchTLS: false
         };
         
         function toggleSwitch(id) {
@@ -1103,6 +1114,9 @@ function generateHomePage(scuValue) {
             if (!ispMobile) subscriptionUrl += '&ispMobile=no';
             if (!ispUnicom) subscriptionUrl += '&ispUnicom=no';
             if (!ispTelecom) subscriptionUrl += '&ispTelecom=no';
+            
+            // 添加TLS控制
+            if (switches.switchTLS) subscriptionUrl += '&dkby=yes';
             
             let finalUrl = subscriptionUrl;
             let schemeUrl = '';
@@ -1236,7 +1250,10 @@ export default {
             const ispUnicom = url.searchParams.get('ispUnicom') !== 'no';
             const ispTelecom = url.searchParams.get('ispTelecom') !== 'no';
             
-            return await handleSubscriptionRequest(request, uuid, domain, piu, ipv4Enabled, ipv6Enabled, ispMobile, ispUnicom, ispTelecom, evEnabled, etEnabled, vmEnabled);
+            // TLS控制
+            const disableNonTLS = url.searchParams.get('dkby') === 'yes';
+            
+            return await handleSubscriptionRequest(request, uuid, domain, piu, ipv4Enabled, ipv6Enabled, ispMobile, ispUnicom, ispTelecom, evEnabled, etEnabled, vmEnabled, disableNonTLS);
         }
         
         return new Response('Not Found', { status: 404 });
