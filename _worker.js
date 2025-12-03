@@ -840,30 +840,11 @@ function generateIPsFromCIDRs(cidrList, minCount) {
     }
 }
 
-// 自动优选功能：从每个 CIDR 段选一个 IP，测试延迟，排序后返回最优的
-async function autoOptimizeIPs(count = 10, port = 443, timeout = 5000, concurrency = 5) {
-    // 从每个 CIDR 段生成一个 IP（生成更多候选 IP 以确保有足够的成功结果）
-    // 生成 count * 2 个候选 IP，以确保即使部分失败也能得到足够的成功结果
+// 生成候选 IP 列表（从每个 CIDR 段选一个）
+function generateCandidateIPs(count = 10) {
+    // 生成更多候选 IP 以确保有足够的成功结果
     const candidateCount = Math.max(count * 2, cloudflareCIDRs.length);
-    const candidateIPs = generateIPsFromCIDRs(cloudflareCIDRs, candidateCount);
-    
-    // 测试所有候选 IP 的延迟
-    const testResults = await batchTestLatency(candidateIPs, port, timeout, concurrency);
-    
-    // 只保留成功的测试结果
-    const successResults = testResults.filter(r => r.success);
-    
-    // 按延迟排序
-    successResults.sort((a, b) => a.latency - b.latency);
-    
-    // 返回前 count 个最优的 IP
-    return successResults.slice(0, count).map(result => ({
-        ip: result.host,
-        port: result.port,
-        latency: result.latency,
-        location: result.location || null,
-        colo: result.colo || null
-    }));
+    return generateIPsFromCIDRs(cloudflareCIDRs, candidateCount);
 }
 
 // 批量测试延迟
@@ -1792,7 +1773,85 @@ function generateHomePage(scuValue) {
             }
         }
         
-        // 自动优选功能
+        // 前端测试单个 IP 延迟（使用用户网络）
+        async function testIPLatency(ip, port, timeout) {
+            const startTime = performance.now();
+            try {
+                const protocol = port === 443 || port === 8443 ? 'https' : 'http';
+                const testUrl = \`\${protocol}://\${ip}:\${port}/cdn-cgi/trace\`;
+                
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), timeout);
+                
+                try {
+                    const response = await fetch(testUrl, {
+                        signal: controller.signal,
+                        headers: {
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                        }
+                    });
+                    
+                    clearTimeout(timeoutId);
+                    const latency = Math.round(performance.now() - startTime);
+                    
+                    if (response.ok) {
+                        const text = await response.text();
+                        const ipMatch = text.match(/ip=([^\\s]+)/);
+                        const locMatch = text.match(/loc=([^\\s]+)/);
+                        const coloMatch = text.match(/colo=([^\\s]+)/);
+                        
+                        return {
+                            success: true,
+                            ip: ip,
+                            port: port,
+                            latency: latency,
+                            location: locMatch ? locMatch[1] : null,
+                            colo: coloMatch ? coloMatch[1] : null
+                        };
+                    } else {
+                        return {
+                            success: false,
+                            ip: ip,
+                            port: port,
+                            latency: latency,
+                            error: \`HTTP \${response.status}\`
+                        };
+                    }
+                } catch (fetchError) {
+                    clearTimeout(timeoutId);
+                    const latency = Math.round(performance.now() - startTime);
+                    
+                    if (fetchError.name === 'AbortError') {
+                        return {
+                            success: false,
+                            ip: ip,
+                            port: port,
+                            latency: timeout,
+                            error: '请求超时'
+                        };
+                    }
+                    
+                    return {
+                        success: false,
+                        ip: ip,
+                        port: port,
+                        latency: latency,
+                        error: fetchError.message || '连接失败'
+                    };
+                }
+            } catch (error) {
+                const latency = Math.round(performance.now() - startTime);
+                return {
+                    success: false,
+                    ip: ip,
+                    port: port,
+                    latency: latency,
+                    error: error.message || '未知错误'
+                };
+            }
+        }
+        
+        // 自动优选功能（前端测试延迟）
         async function autoOptimize() {
             const count = parseInt(document.getElementById('optimizeCount').value) || 10;
             const port = parseInt(document.getElementById('optimizePort').value) || 443;
@@ -1807,67 +1866,104 @@ function generateHomePage(scuValue) {
             
             optimizeBtn.disabled = true;
             optimizeBtn.textContent = '优选中...';
-            optimizeResult.style.display = 'none';
-            optimizeResult.innerHTML = '';
+            optimizeResult.style.display = 'block';
+            optimizeResult.innerHTML = '<div style="padding: 12px; text-align: center; color: #86868b;">正在生成候选 IP 列表...</div>';
             
             try {
+                // 步骤1: 从后端获取候选 IP 列表
                 const currentUrl = new URL(window.location.href);
                 const baseUrl = currentUrl.origin;
-                const optimizeUrl = \`\${baseUrl}/auto-optimize?count=\${count}&port=\${port}&timeout=\${timeout}\`;
+                const optimizeUrl = \`\${baseUrl}/auto-optimize?count=\${count}\`;
                 
                 const response = await fetch(optimizeUrl);
                 const data = await response.json();
                 
-                if (data.success) {
-                    optimizeResult.style.display = 'block';
-                    let html = \`
-                        <div style="padding: 12px; background: rgba(52, 199, 89, 0.1); border-radius: 8px; margin-bottom: 12px;">
-                            <div style="font-weight: 600; margin-bottom: 4px; color: #34c759;">✓ 优选完成</div>
-                            <div style="font-size: 13px; color: #86868b;">成功优选: \${data.total} 个 IP（按延迟排序）</div>
-                        </div>
-                    \`;
-                    
-                    if (data.results && data.results.length > 0) {
-                        data.results.forEach((result, index) => {
-                            html += \`
-                                <div style="padding: 12px; background: rgba(52, 199, 89, 0.1); border-radius: 8px; margin-bottom: 8px;">
-                                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-                                        <div style="font-weight: 600; color: #34c759;">#\${index + 1} \${result.ip}:\${result.port}</div>
-                                        <div style="font-weight: 600; color: #1d1d1f;">\${result.latency}ms</div>
-                                    </div>
-                                    \${result.location ? \`<div style="font-size: 13px; color: #86868b;">位置: \${result.location}</div>\` : ''}
-                                    \${result.colo ? \`<div style="font-size: 13px; color: #86868b;">数据中心: \${result.colo}</div>\` : ''}
-                                </div>
-                            \`;
-                        });
-                        
-                        // 添加复制按钮
-                        const ipList = data.results.map(r => \`\${r.ip}:\${r.port}\`).join('\\n');
-                        html += \`
-                            <button type="button" class="btn btn-secondary" onclick="copyOptimizedIPs()" style="margin-top: 12px; width: 100%;" id="copyOptimizeBtn">复制所有IP</button>
-                        \`;
-                        
-                        // 保存到全局变量以便复制
-                        window.optimizedIPs = ipList;
-                    } else {
-                        html += \`
-                            <div style="padding: 12px; background: rgba(255, 59, 48, 0.1); border-radius: 8px; color: #ff3b30;">
-                                未找到可用的 IP，请重试
-                            </div>
-                        \`;
-                    }
-                    
-                    optimizeResult.innerHTML = html;
-                } else {
-                    optimizeResult.style.display = 'block';
+                if (!data.success || !data.ips || data.ips.length === 0) {
                     optimizeResult.innerHTML = \`
                         <div style="padding: 12px; background: rgba(255, 59, 48, 0.1); border-radius: 8px; color: #ff3b30;">
-                            优选失败: \${data.error || '未知错误'}
+                            获取 IP 列表失败: \${data.error || '未知错误'}
+                        </div>
+                    \`;
+                    return;
+                }
+                
+                const candidateIPs = data.ips;
+                optimizeResult.innerHTML = \`<div style="padding: 12px; text-align: center; color: #86868b;">已生成 \${candidateIPs.length} 个候选 IP，正在测试延迟（使用您的网络）...</div>\`;
+                
+                // 步骤2: 在前端测试所有 IP 的延迟（使用用户网络）
+                const testResults = [];
+                const concurrency = 5; // 并发数
+                
+                for (let i = 0; i < candidateIPs.length; i += concurrency) {
+                    const chunk = candidateIPs.slice(i, i + concurrency);
+                    const chunkResults = await Promise.allSettled(
+                        chunk.map(ip => testIPLatency(ip, port, timeout))
+                    );
+                    
+                    chunkResults.forEach((result, index) => {
+                        if (result.status === 'fulfilled') {
+                            testResults.push(result.value);
+                        } else {
+                            testResults.push({
+                                success: false,
+                                ip: chunk[index],
+                                port: port,
+                                latency: timeout,
+                                error: result.reason?.message || '测试失败'
+                            });
+                        }
+                    });
+                    
+                    // 更新进度
+                    const tested = Math.min(i + concurrency, candidateIPs.length);
+                    optimizeBtn.textContent = \`测试中... (\${tested}/\${candidateIPs.length})\`;
+                }
+                
+                // 步骤3: 筛选成功的测试结果并按延迟排序
+                const successResults = testResults.filter(r => r.success);
+                successResults.sort((a, b) => a.latency - b.latency);
+                
+                // 步骤4: 显示结果
+                let html = \`
+                    <div style="padding: 12px; background: rgba(52, 199, 89, 0.1); border-radius: 8px; margin-bottom: 12px;">
+                        <div style="font-weight: 600; margin-bottom: 4px; color: #34c759;">✓ 优选完成</div>
+                        <div style="font-size: 13px; color: #86868b;">成功优选: \${successResults.length} 个 IP（按延迟排序）</div>
+                    </div>
+                \`;
+                
+                if (successResults.length > 0) {
+                    const topResults = successResults.slice(0, count);
+                    topResults.forEach((result, index) => {
+                        html += \`
+                            <div style="padding: 12px; background: rgba(52, 199, 89, 0.1); border-radius: 8px; margin-bottom: 8px;">
+                                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                                    <div style="font-weight: 600; color: #34c759;">#\${index + 1} \${result.ip}:\${result.port}</div>
+                                    <div style="font-weight: 600; color: #1d1d1f;">\${result.latency}ms</div>
+                                </div>
+                                \${result.location ? \`<div style="font-size: 13px; color: #86868b;">位置: \${result.location}</div>\` : ''}
+                                \${result.colo ? \`<div style="font-size: 13px; color: #86868b;">数据中心: \${result.colo}</div>\` : ''}
+                            </div>
+                        \`;
+                    });
+                    
+                    // 添加复制按钮
+                    const ipList = topResults.map(r => \`\${r.ip}:\${r.port}\`).join('\\n');
+                    html += \`
+                        <button type="button" class="btn btn-secondary" onclick="copyOptimizedIPs()" style="margin-top: 12px; width: 100%;" id="copyOptimizeBtn">复制所有IP</button>
+                    \`;
+                    
+                    // 保存到全局变量以便复制
+                    window.optimizedIPs = ipList;
+                } else {
+                    html += \`
+                        <div style="padding: 12px; background: rgba(255, 59, 48, 0.1); border-radius: 8px; color: #ff3b30;">
+                            未找到可用的 IP，请重试或增加超时时间
                         </div>
                     \`;
                 }
+                
+                optimizeResult.innerHTML = html;
             } catch (error) {
-                optimizeResult.style.display = 'block';
                 optimizeResult.innerHTML = \`
                     <div style="padding: 12px; background: rgba(255, 59, 48, 0.1); border-radius: 8px; color: #ff3b30;">
                         网络错误: \${error.message || '未知错误'}
@@ -2016,7 +2112,7 @@ export default {
             }
         }
         
-        // 自动优选 API: /auto-optimize?count=10&port=443&timeout=5000
+        // 自动优选 API: /auto-optimize?count=10 (只生成 IP 列表，不测试)
         if (path === '/auto-optimize') {
             if (request.method === 'OPTIONS') {
                 return new Response(null, {
@@ -2030,8 +2126,6 @@ export default {
             
             try {
                 const count = parseInt(url.searchParams.get('count') || '10');
-                const port = parseInt(url.searchParams.get('port') || '443');
-                const timeout = parseInt(url.searchParams.get('timeout') || '5000');
                 
                 if (count < 1 || count > 50) {
                     return new Response(JSON.stringify({ 
@@ -2046,13 +2140,14 @@ export default {
                     });
                 }
                 
-                const results = await autoOptimizeIPs(count, port, timeout, 5);
+                // 只生成 IP 列表，不测试（测试在前端进行，使用用户网络）
+                const candidateIPs = generateCandidateIPs(count * 2);
                 
                 return new Response(JSON.stringify({ 
                     success: true, 
-                    results: results,
-                    total: results.length,
-                    message: `成功优选 ${results.length} 个 IP`
+                    ips: candidateIPs,
+                    total: candidateIPs.length,
+                    message: `生成了 ${candidateIPs.length} 个候选 IP`
                 }, null, 2), {
                     headers: { 
                         'Content-Type': 'application/json; charset=utf-8',
